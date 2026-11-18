@@ -1,0 +1,24 @@
+{
+  "name": "deliverooagent",
+  "version": "1.1.0",
+  "description": "",
+  "type": "module",
+  "main": "index.js",
+  "module": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "Marco",
+  "license": "ISC",
+  "devDependencies": {
+    "dotenv": "^16.0.3",
+    "getopts": "^2.3.0"
+  },
+  "dependencies": {
+    "@unitn-asa/deliveroo-js-sdk": "^3.0.3",
+    "@unitn-asa/pddl-client": "^1.7.7",
+    "argparse": "^2.0.1",
+    "openai": "^6.37.0"
+  }
+}
