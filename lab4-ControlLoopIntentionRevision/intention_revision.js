@@ -218,6 +218,19 @@ class IntentionRevisionReplace extends IntentionRevision {
 
 }
 
+function utility(predicate){ //predicate = ['go_pick_up', x, y, id]
+
+    let id = predicate[3]
+    let p = parcels.get(id)
+
+    if ( p==undefined || p.carriedBy ) {
+        return -Infinity;
+    }
+    else{
+        return p.reward - distance(me, p);
+    }
+}
+
 class IntentionRevisionRevise extends IntentionRevision {
 
     /**
@@ -225,10 +238,33 @@ class IntentionRevisionRevise extends IntentionRevision {
      */
     async push ( predicate ) {
         console.log( 'Revising intention queue. Received', ...predicate );
-        // TODO
-        // - order intentions based on utility function (reward - cost) (for example, parcel score minus distance)
-        // - eventually stop current one
-        // - evaluate validity of intention
+        
+        let current = this.intention_queue[0];
+
+        // if the queue is empty, add the new one
+        if(current == undefined){
+            const intention = new IntentionDeliberation( this, predicate );
+            this.intention_queue.push( intention );
+            return;
+        }
+        
+        // if the new one is alewady in the queue, return
+        if ( this.intention_queue.find( (i) => i.predicate.join(' ') == predicate.join(' ') ) ){
+            return;
+        }
+
+        const newUtility = utility(predicate);
+        const currentUtility = utility(current.predicate);
+
+        // if current = -Infinity OR the new one is much better -> add the new one and stop the current
+        if(currentUtility == -Infinity || newUtility > currentUtility + 0.2 * Math.abs(currentUtility)){ //if it is better than 20%
+            const intention = new IntentionDeliberation( this, predicate );
+            this.intention_queue.push( intention );
+    
+            current.stop();
+        }
+
+        
     }
 
 }
@@ -238,8 +274,8 @@ class IntentionRevisionRevise extends IntentionRevision {
  */
 
 // const myAgent = new IntentionRevisionQueue();
-const myAgent = new IntentionRevisionReplace();
-// const myAgent = new IntentionRevisionRevise();
+//const myAgent = new IntentionRevisionReplace();
+const myAgent = new IntentionRevisionRevise();
 myAgent.loop();
 
 
