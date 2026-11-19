@@ -36,6 +36,19 @@ socket.onSensing( ( { self } ) => {
  */
 const parcels = new Map();
 
+/**
+ * @type { {x:number, y:number}[] }
+ */
+const deliveryTiles = [];
+
+socket.onMap( ( width, height, tiles ) => {
+    deliveryTiles.length = 0;
+    for ( const tile of tiles ) {
+        if ( tile.delivery )
+            deliveryTiles.push( { x: tile.x, y: tile.y } );
+    }
+} )
+
 socket.onSensing( async ( sensing ) => {
     // add or update perceived parcels
     for (const p of sensing.parcels) {
@@ -49,6 +62,12 @@ socket.onSensing( async ( sensing ) => {
         }
     }
 } )
+
+function nearestDelivery ( position ) {
+    return deliveryTiles
+        .slice()
+        .sort( (a, b) => distance( position, a ) - distance( position, b ) )[0];
+}
 
 
 
@@ -64,6 +83,14 @@ function optionsGeneration () {
      * @type { Array< [string, ...any] > }
      */
     const options = []
+
+    const carrying = Array.from( parcels.values() )
+        .some( parcel => parcel.carriedBy == me.id );
+    if ( carrying ) {
+        myAgent.push( [ 'go_deliver' ] );
+        return;
+    }
+
     for (const parcel of parcels.values())
         if ( ! parcel.carriedBy )
             options.push( [ 'go_pick_up', parcel.x, parcel.y, parcel.id ] );
@@ -134,9 +161,9 @@ class IntentionRevision {
                 
                 // Is queued intention still valid? Do I still want to achieve it?
                 // TODO this hard-coded implementation is an example
-                let id = intention.predicate[2]
+                let id = intention.predicate[3]
                 let p = parcels.get(id)
-                if ( p && p.carriedBy ) {
+                if ( intention.predicate[0] == 'go_pick_up' && p && p.carriedBy ) {
                     console.log( 'Skipping intention because no more valid', intention.predicate )
                 }
                 else {
@@ -486,6 +513,35 @@ class GoPickUp extends PlanBase {
  * @implements { Plan }
  * @extends { PlanBase }
  */
+class GoDeliver extends PlanBase {
+
+    /**
+     * @type { function( string ) : boolean }
+     */
+    static isApplicableTo ( go_deliver ) {
+        return go_deliver == 'go_deliver';
+    }
+
+    /**
+     * @type { function( string ) : Promise<boolean> }
+     */
+    async execute ( go_deliver ) {
+        const delivery = nearestDelivery( me );
+        if ( ! delivery )
+            throw [ 'no delivery tile available' ];
+
+        await this.subIntention( [ 'go_to', delivery.x, delivery.y ] );
+        if ( this.stopped ) throw [ 'stopped' ];
+
+        await socket.emitPutdown();
+        return true;
+    }
+}
+
+/**
+ * @implements { Plan }
+ * @extends { PlanBase }
+ */
 class BlindMove extends PlanBase {
 
     /**
@@ -551,4 +607,5 @@ class BlindMove extends PlanBase {
 
 // plan classes are added to plan library 
 planLibrary.push( GoPickUp )
+planLibrary.push( GoDeliver )
 planLibrary.push( BlindMove )
