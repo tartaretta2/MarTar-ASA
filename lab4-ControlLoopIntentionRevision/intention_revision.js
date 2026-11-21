@@ -50,6 +50,41 @@ socket.onSensing( async ( sensing ) => {
     }
 } )
 
+// the map
+const spawnerTiles = [];    //parcels spawner
+const walkableTiles = [];   
+
+socket.onMap( (width, height, tiles) => {
+    spawnerTiles.length = 0;
+    walkableTiles.length = 0;
+    for( const tile of tiles ) {
+        if( tile.type == '0' ){
+            continue;
+        }
+        walkableTiles.push( {x: tile.x, y: tile.y});
+        
+        if ( tile.type == '1' ){
+            spawnerTiles.push( {x: tile.x, y: tile.y} );
+        }
+    }
+} )
+
+function pickExploreTarget(){
+    let candidates = [];
+    if( spawnerTiles.length > 0 ){
+        candidates = spawnerTiles;
+    } else { candidates = walkableTiles; }
+    
+    const far = candidates.filter( tile => distance(tile, me) > 3 );
+
+    let pool =[];
+    if (far.length > 0){
+        pool = far;
+    } else { pool = candidates; }
+
+    let index = Math.floor( Math.random() * pool.length );
+    return pool[index];
+} 
 
 
 /**
@@ -88,9 +123,12 @@ function optionsGeneration () {
     /**
      * Best option is selected
      */
-    if ( best_option )
+    if ( best_option ){
         myAgent.push( best_option )
-
+    }
+    else{
+        myAgent.push( ['explore'] )
+    }
 }
 
 /**
@@ -134,9 +172,9 @@ class IntentionRevision {
                 
                 // Is queued intention still valid? Do I still want to achieve it?
                 // TODO this hard-coded implementation is an example
-                let id = intention.predicate[2]
+                let id = intention.predicate[3]
                 let p = parcels.get(id)
-                if ( p && p.carriedBy ) {
+                if ( intention.predicate[0] == 'go_pick_up' && p && p.carriedBy ) {
                     console.log( 'Skipping intention because no more valid', intention.predicate )
                 }
                 else {
@@ -482,6 +520,24 @@ class GoPickUp extends PlanBase {
 
 }
 
+class Explore extends PlanBase {
+    static isApplicableTo(explore){
+        if (explore == 'explore'){
+            return true;
+        } return false;
+    }
+
+    async execute(explore){
+        let target = pickExploreTarget();
+        if ( !target ) throw ['no tile to explore']; //if target doesn't exist
+        if ( this.stopped ) throw ['stopped'];
+        await this.subIntention(['go_to', target.x, target.y]);
+        if ( this.stopped ) throw ['stopped'];  
+
+        return true;
+    }
+}
+
 /**
  * @implements { Plan }
  * @extends { PlanBase }
@@ -551,4 +607,5 @@ class BlindMove extends PlanBase {
 
 // plan classes are added to plan library 
 planLibrary.push( GoPickUp )
+planLibrary.push( Explore )
 planLibrary.push( BlindMove )
