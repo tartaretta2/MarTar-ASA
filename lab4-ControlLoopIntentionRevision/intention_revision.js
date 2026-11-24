@@ -50,14 +50,37 @@ socket.onSensing( async ( sensing ) => {
     }
 } )
 
+const occupied = new Set();
+
+socket.onSensing( async ( sensing ) => {
+    occupied.clear();
+    for( const a of sensing.agents ){
+        if ( a.id == me.id ) continue;
+        if ( a.x == undefined || a.y == undefined ) continue;
+        occupied.add( key(Math.floor(a.x), Math.floor(a.y)) );
+        occupied.add( key(Math.ceil(a.x), Math.ceil(a.y)) );
+    }
+})
+
 // the map
+
+// key for the .set() function of Map
+function key(x,y){
+    return `${x},${y}`;
+}
+
 const spawnerTiles = [];    //parcels spawner
 const walkableTiles = [];   
+const tileTypes = new Map;
 
 socket.onMap( (width, height, tiles) => {
     spawnerTiles.length = 0;
-    walkableTiles.length = 0;
+    walkableTiles.length = 0; 
+    tileTypes.clear();
+
     for( const tile of tiles ) {
+        tileTypes.set(key(tile.x, tile.y), tile.type);
+
         if( tile.type == '0' ){
             continue;
         }
@@ -70,22 +93,110 @@ socket.onMap( (width, height, tiles) => {
 } )
 
 function pickExploreTarget(){
+    const sx = Math.round(me.x);
+    const sy = Math.round(me.y);
     let candidates = [];
     if( spawnerTiles.length > 0 ){
         candidates = spawnerTiles;
     } else { candidates = walkableTiles; }
+
+    let reachable = [];
+    for( const t of candidates ){
+        const path = bfs(sx, sy, t.x, t.y);
+        if (path != null){
+            reachable.push({x: t.x, y: t.y, len: path.length});
+        }
+    }
     
-    const far = candidates.filter( tile => distance(tile, me) > 3 );
+    const far = reachable.filter( tile => tile.len > 3);
 
     let pool =[];
     if (far.length > 0){
         pool = far;
-    } else { pool = candidates; }
+    } else { pool = reachable; }
 
     let index = Math.floor( Math.random() * pool.length );
     return pool[index];
 } 
 
+
+// canEnter returns true if the agent can move from the tile "from" to the near "to" tile, otherwise false
+const arrowDirections = {
+        '↑' : { dx:  0, dy:  1 },
+        '→' : { dx:  1, dy:  0 },
+        '↓' : { dx:  0, dy: -1 },
+        '←' : { dx: -1, dy:  0 }
+};
+
+function canEnter(fromX, fromY, toX, toY, avoidAgents=false){
+    const type = tileTypes.get(key(toX, toY));
+
+    if( !type ) return false;
+    if ( type == '0' ) return false; // '0' = wall
+
+    const dx = toX - fromX;
+    const dy = toY - fromY;
+
+    if (type in arrowDirections){
+        const v = arrowDirections[type];
+        if( dx == -v.dx && dy == -v.dy){
+            return false;
+        }
+    }
+
+    if(avoidAgents && occupied.has( key(toX, toY) )) return false;
+
+    return true
+
+}
+
+
+// bfs (breadth-first search) function returns the array of moves to go to the target
+// example: ['up', 'up', 'left'] or null if the target cannot be reached
+// bfs explores "in circles" from the starting point
+
+const moves = [
+    { name : 'up', dx : 0, dy : 1 },
+    { name: 'down',  dx:  0, dy: -1 },
+    { name: 'right', dx:  1, dy:  0 },
+    { name: 'left',  dx: -1, dy:  0 }
+]
+
+function bfs(startX, startY, targetX, targetY, avoidAgents=false){
+    if ( startX == targetX && startY == targetY ) return []; //if you are already in the target
+    
+    const queue = [ { x : startX, y : startY } ];
+    const visited = new Map();
+    visited.set( key(startX, startY), null );
+
+    while ( queue.length > 0 ){
+        const cur = queue.shift();
+
+        for( const m of moves ){
+            const nx = cur.x + m.dx;
+            const ny = cur.y + m.dy;
+
+            if (visited.has(key(nx, ny))) continue;
+            if ( !canEnter(cur.x, cur.y, nx, ny, avoidAgents) ) continue;
+
+
+            visited.set( key(nx, ny), { from: cur, move: m.name });
+
+            if(nx == targetX && ny == targetY ){
+                const path = [];
+                let pos = { x:targetX, y:targetY };
+                while(visited.get(key(pos.x, pos.y)) != null){
+                    const step = visited.get(key(pos.x, pos.y));
+                    path.unshift(step.move);
+                    pos = step.from;
+                }
+                return path;
+            }
+            queue.push({x: nx, y: ny});
+        }
+    }
+    return null;
+}
 
 /**
  * Options generation and filtering function
@@ -135,6 +246,7 @@ function optionsGeneration () {
  * Generate options at every sensing event
  */
 socket.onSensing( optionsGeneration )
+setInterval( optionsGeneration, 500 );
 
 // /**
 //  * Alternatively, generate options continuously
@@ -538,6 +650,44 @@ class Explore extends PlanBase {
     }
 }
 
+
+class GoToBFS extends PlanBase{
+    static isApplicableTo(go_to, x, y){
+        return go_to == 'go_to' 
+    }
+
+    async execute(go_to, x, y){
+        let replans = 0; //how many times recalculated
+
+        while (true){
+            if ( this.stopped ) throw ['stopped'];
+            const sx = Math.round(me.x);
+            const sy = Math.round(me.y);
+
+            if( sx == x && sy == y ) return true;
+
+            const path = bfs(sx, sy, x, y, true); 
+
+            if ( path == null ) throw ['no path'];
+
+            for (const move of path ){
+                if ( this.stopped ) throw ['stopped'];
+
+                const result = await socket.emitMove(move);
+
+                if ( result ) {
+                    me.x = result.x;
+                    me.y = result.y;
+                } else {
+                    replans++;
+                    if ( replans > 3 ) throw ['stuck'];
+                    break;
+                }
+            }   
+        }
+    }
+}
+
 /**
  * @implements { Plan }
  * @extends { PlanBase }
@@ -608,4 +758,5 @@ class BlindMove extends PlanBase {
 // plan classes are added to plan library 
 planLibrary.push( GoPickUp )
 planLibrary.push( Explore )
+planLibrary.push( GoToBFS )
 planLibrary.push( BlindMove )
