@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { DjsConnect } from "@unitn-asa/deliveroo-js-sdk/client";
+import { DjsConnect, DjsClientSocket } from "@unitn-asa/deliveroo-js-sdk/client";
 
 const socket = DjsConnect();
 
@@ -10,7 +10,8 @@ function distance( {x:x1, y:y1}, {x:x2, y:y2}) {
     return dx + dy;
 }
 
-
+const MAX_CARRYING = 5;
+const INTENTION_TIMEOUT_MS = 5000;
 
 /**
  * Belief revision
@@ -36,6 +37,9 @@ socket.onSensing( ( { self } ) => {
  */
 const parcels = new Map();
 
+const carrying = new Map();
+//let myAgent;
+
 /**
  * @type { {x:number, y:number}[] }
  */
@@ -44,8 +48,9 @@ const deliveryTiles = [];
 socket.onMap( ( width, height, tiles ) => {
     deliveryTiles.length = 0;
     for ( const tile of tiles ) {
-        if ( tile.delivery )
-            deliveryTiles.push( { x: tile.x, y: tile.y } );
+        if (tile.type === '2' || tile.type === '9') {
+            deliveryTiles.push({ x: tile.x, y: tile.y });
+        }
     }
 } )
 
@@ -53,7 +58,14 @@ socket.onSensing( async ( sensing ) => {
     // add or update perceived parcels
     for (const p of sensing.parcels) {
         parcels.set( p.id, p);
+        
+        // check parcels being carried by me
+        if ( p.carriedBy == me.id ) 
+            carrying.set( p.id, p );
+        else  
+            carrying.delete( p.id );
     }
+
     // forget parcels that are no longer perceived
     const perceived_ids = new Set( sensing.parcels.map( p => p.id ) );
     for ( const id of parcels.keys() ) {
@@ -61,6 +73,14 @@ socket.onSensing( async ( sensing ) => {
             parcels.delete( id );
         }
     }
+
+    for ( const id of carrying.keys() ) {
+        if ( ! perceived_ids.has( id ) )
+            carrying.delete( id );
+    }
+
+    if ( carrying.size === 0 )
+        myAgent?.cancelCurrent( 'go_deliver' );
 } )
 
 function nearestDelivery ( position ) {
@@ -84,11 +104,14 @@ function optionsGeneration () {
      */
     const options = []
 
-    const carrying = Array.from( parcels.values() )
-        .some( parcel => parcel.carriedBy == me.id );
-    if ( carrying ) {
-        myAgent.push( [ 'go_deliver' ] );
-        return;
+    //const carrying = Array.from( parcels.values() )
+    //    .some( parcel => parcel.carriedBy == me.id );
+    if ( carrying.size > 0){
+        if( parcels.size == carrying.size || carrying.size == MAX_CARRYING ){
+            myAgent.push( [ 'go_deliver' ] );
+            return;
+        }
+        options.push( [ 'go_deliver' ] );
     }
 
     for (const parcel of parcels.values())
@@ -106,8 +129,8 @@ function optionsGeneration () {
             let [go_pick_up,x,y,id] = option;
             let current_d = distance( {x, y}, me )
             if ( current_d < nearest ) {
-                best_option = option
-                nearest = current_d
+                best_option = option;
+                nearest = current_d;
             }
         }
     }
@@ -116,7 +139,7 @@ function optionsGeneration () {
      * Best option is selected
      */
     if ( best_option )
-        myAgent.push( best_option )
+        myAgent.push( best_option );
 
 }
 
@@ -150,6 +173,14 @@ class IntentionRevision {
         return this.#intention_queue;
     }
 
+    cancelCurrent ( predicate ) {
+        const current = this.intention_queue[0];
+        if ( current?.predicate[0] === predicate ) {
+            console.log( 'Canceling invalid intention', current.predicate );
+            current.stop();
+        }
+    }
+
     async loop ( ) {
         while ( true ) {
             // Consumes intention_queue if not empty
@@ -166,20 +197,39 @@ class IntentionRevision {
                 if ( intention.predicate[0] == 'go_pick_up' && p && p.carriedBy ) {
                     console.log( 'Skipping intention because no more valid', intention.predicate )
                 }
+                else if (intention.predicate[0] == 'go_deliver' && carrying.size === 0) {
+                    console.log( 'Skipping intention because no more valid', intention.predicate )
+                }
                 else {
-                    // Start achieving intention
-                    await intention.achieve()
-                    // Catch eventual error and continue
-                    .catch( error => {
-                        // console.log( 'Failed intention', ...intention.predicate, 'with error:', ...error )
+                    let timedOut = false;
+                    let timeoutId;
+                    const timeout = new Promise( resolve => {
+                        timeoutId = setTimeout( () => {
+                            timedOut = true;
+                            intention.stop();
+                            resolve( false );
+                        }, INTENTION_TIMEOUT_MS );
                     } );
+
+                    await Promise.race([
+                        intention.achieve().catch( error => {
+                            console.log( 'Failed intention', ...intention.predicate, 'with error:', error );
+                            return false;
+                        } ),
+                        timeout
+                    ]);
+                    clearTimeout( timeoutId );
+                    if ( timedOut )
+                        console.warn( 'Intention timed out and was stopped', intention.predicate );
                 }
 
                 // Remove from the queue
                 this.intention_queue.shift();
             }
-            // Postpone next iteration at setImmediate
-            await new Promise( res => setImmediate( res ) );
+            if ( this.intention_queue.length > 0 )
+                await new Promise( res => setImmediate( res ) );
+            else
+                await new Promise( res => setTimeout( res, 50 ) );
         }
     }
 
@@ -228,7 +278,7 @@ class IntentionRevisionReplace extends IntentionRevision {
     async push ( predicate ) {
 
         // Check if already queued
-        const last = this.intention_queue.at( this.intention_queue.length - 1 );
+        const last = this.intention_queue[this.intention_queue.length - 1];        
         if ( last && last.predicate.join(' ') == predicate.join(' ') ) {
             return; // intention is already being achieved
         }
@@ -245,8 +295,21 @@ class IntentionRevisionReplace extends IntentionRevision {
 
 }
 
-function utility(predicate){ //predicate = ['go_pick_up', x, y, id]
+/*function utility(predicate){ //predicate = ['go_pick_up', x, y, id]
 
+    if ( predicate[0] === 'go_deliver' ) {
+        return deliverUtility();
+    }
+
+    if(predicate[0] === 'go_pick_up'){
+        const parcel = parcels.get(predicate[3]);
+        if(!parcel || parcel.carriedBy){
+            return -Infinity;
+        }
+        return pickupUtility(parcel);
+    }
+
+    /*
     let id = predicate[3]
     let p = parcels.get(id)
 
@@ -254,8 +317,103 @@ function utility(predicate){ //predicate = ['go_pick_up', x, y, id]
         return -Infinity;
     }
     else{
-        return p.reward - distance(me, p);
+        return p.reward - distance(me, p) - distance(p, nearestDelivery(p));
     }
+    
+}
+
+function carriedReward() {
+    let total = 0;
+
+    for (const parcel of carrying.values()) {
+        total += parcel.reward;
+    }
+
+    return total;
+}
+
+function deliverUtility() {
+    if (carrying.size === 0) {
+        return -Infinity;
+    }
+
+    const delivery = nearestDelivery(me);
+
+    if (!delivery) {
+        return -Infinity;
+    }
+
+    //total reward of carried parcels minus the distance to the nearest delivery tile
+    //each parcel loses 1 reward point for each tile of distance to the delivery tile
+    return carriedReward() - (carrying.size * distance(me, delivery));
+}
+
+function pickupUtility(parcel) {
+    const delivery = nearestDelivery(parcel);
+
+    if (!delivery) {
+        return -Infinity;
+    }
+
+    const routeDistance =
+        distance(me, parcel) +
+        distance(parcel, delivery);
+
+    return parcel.reward - routeDistance;
+}
+
+
+function totalPossibleReward(){
+    let reward = 0;
+    //check all possible paths to collect all sensed parcels
+    //compare the total reward of each path and return the maximum one
+    //also compare with single pickup and delivery paths
+
+    //!!!EXPENSIVE OPERATION???
+
+
+    for (const p1 of parcels.values()) {
+        if (!p1.carriedBy) {
+            reward += p1.reward - distance(me, p1) - distance(p1, nearestDelivery(p1));
+        }
+        if(parcels.size > 1){
+            for(const p2 of parcels.values()){
+                if(p1.id !== p2.id && !p2.carriedBy){
+                    const routeDistance = distance(me, p1) + distance(p1, p2) + distance(p2, nearestDelivery(p2));
+                    const totalReward = p1.reward + p2.reward - routeDistance;
+                    if(totalReward > reward){
+                        reward = totalReward;
+                    }
+                }
+            }   
+        }
+    }
+
+
+
+    return reward;
+}*/
+
+function utility(predicate) {
+    if ( predicate[0] === 'go_deliver' ) {
+        if ( carrying.size === 0 ) return -Infinity;
+        const delivery = nearestDelivery( me );
+        if ( ! delivery ) return -Infinity;
+        let reward = 0;
+        for ( const parcel of carrying.values() )
+            reward += parcel.reward;
+        return reward - carrying.size * distance( me, delivery );
+    }
+
+    if ( predicate[0] === 'go_pick_up' ) {
+        const parcel = parcels.get( predicate[3] );
+        if ( ! parcel || parcel.carriedBy ) return -Infinity;
+        const delivery = nearestDelivery( parcel );
+        if ( ! delivery ) return -Infinity;
+        return parcel.reward - distance( me, parcel ) - distance( parcel, delivery );
+    }
+
+    return -Infinity;
 }
 
 class IntentionRevisionRevise extends IntentionRevision {
@@ -502,8 +660,18 @@ class GoPickUp extends PlanBase {
         if ( this.stopped ) throw ['stopped']; // if stopped then quit
         await this.subIntention( ['go_to', x, y] );
         if ( this.stopped ) throw ['stopped']; // if stopped then quit
-        await socket.emitPickup()
+        const picked = await socket.emitPickup()
         if ( this.stopped ) throw ['stopped']; // if stopped then quit
+        
+        // update parcels beliefset and carrying set
+        for (const p of picked) {
+            const parcel = parcels.get(p.id);
+            if (parcel) {
+                parcel.carriedBy = me.id;
+                carrying.set(parcel.id, parcel);
+            }
+        }
+
         return true;
     }
 
@@ -526,14 +694,26 @@ class GoDeliver extends PlanBase {
      * @type { function( string ) : Promise<boolean> }
      */
     async execute ( go_deliver ) {
+        if ( this.stopped || carrying.size === 0 )
+            throw [ 'no parcels to deliver' ];
+
         const delivery = nearestDelivery( me );
         if ( ! delivery )
             throw [ 'no delivery tile available' ];
 
         await this.subIntention( [ 'go_to', delivery.x, delivery.y ] );
-        if ( this.stopped ) throw [ 'stopped' ];
+        if ( this.stopped || carrying.size === 0 ) throw [ 'stopped' ];
 
-        await socket.emitPutdown();
+        const dropped = await socket.emitPutdown();
+
+        // update parcels beliefset and carrying set
+        for (const p of dropped) {
+            const parcel = parcels.get(p.id);
+            if (parcel) {
+                parcel.carriedBy = undefined;
+                carrying.delete(parcel.id);
+            }
+        }   
         return true;
     }
 }
