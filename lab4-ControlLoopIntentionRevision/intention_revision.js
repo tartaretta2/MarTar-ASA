@@ -10,7 +10,14 @@ function distance( {x:x1, y:y1}, {x:x2, y:y2}) {
     return dx + dy;
 }
 
-const MAX_CARRYING = 5;
+// capacity is set by the server (GAME.player.capacity, -1 = unlimited); 5 is the server default
+let MAX_CARRYING = 5;
+
+socket.onConfig( ( config ) => {
+    const capacity = config?.GAME?.player?.capacity;
+    if ( capacity === -1 ) MAX_CARRYING = Infinity;
+    else if ( typeof capacity === 'number' ) MAX_CARRYING = capacity;
+} );
 const INTENTION_TIMEOUT_MS = 5000;
 
 /**
@@ -254,7 +261,8 @@ function optionsGeneration () {
     //const carrying = Array.from( parcels.values() )
     //    .some( parcel => parcel.carriedBy == me.id );
     if ( carrying.size > 0){
-        if( parcels.size == carrying.size || carrying.size == MAX_CARRYING ){
+        const freeParcels = Array.from( parcels.values() ).some( parcel => ! parcel.carriedBy );
+        if( ! freeParcels || carrying.size >= MAX_CARRYING ){
             myAgent.push( [ 'go_deliver' ] );
             return;
         }
