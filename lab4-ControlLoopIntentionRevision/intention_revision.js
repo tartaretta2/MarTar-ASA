@@ -99,6 +99,25 @@ function nearestDelivery ( position ) {
         .sort( (a, b) => distance( position, a ) - distance( position, b ) )[0];
 }
 
+const DELIVERY_PRIORITY_MARGIN = 3;
+// if the nearest delivery tile is closer than the nearest free parcel
+//  by at least DELIVERY_PRIORITY_MARGIN, then deliver first
+function shouldDeliverBeforePickup () {
+    if ( carrying.size === 0 ) return false;
+
+    const delivery = nearestDelivery( me );
+    if ( ! delivery ) return false;
+
+    let nearestFreeParcelDistance = Number.MAX_VALUE;
+    for ( const parcel of parcels.values() ) {
+        if ( parcel.carriedBy ) continue;
+        nearestFreeParcelDistance = Math.min( nearestFreeParcelDistance, distance( me, parcel ) );
+    }
+
+    return nearestFreeParcelDistance < Number.MAX_VALUE &&
+        distance( me, delivery ) + DELIVERY_PRIORITY_MARGIN <= nearestFreeParcelDistance;
+}
+
 
 socket.onSensing( async ( sensing ) => {
     occupied.clear();
@@ -270,6 +289,10 @@ function optionsGeneration () {
     if ( carrying.size > 0){
         const freeParcels = Array.from( parcels.values() ).some( parcel => ! parcel.carriedBy );
         if( ! freeParcels || carrying.size >= MAX_CARRYING ){
+            myAgent.push( [ 'go_deliver' ] );
+            return;
+        }
+        if ( shouldDeliverBeforePickup() ) {
             myAgent.push( [ 'go_deliver' ] );
             return;
         }
@@ -592,6 +615,9 @@ class IntentionRevisionRevise extends IntentionRevision {
         
         let current = this.intention_queue[0];
 
+        if ( predicate[0] === 'go_pick_up' && shouldDeliverBeforePickup() )
+            return;
+
         // if the queue is empty, add the new one
         if(current == undefined){
             const intention = new IntentionDeliberation( this, predicate );
@@ -601,6 +627,15 @@ class IntentionRevisionRevise extends IntentionRevision {
         
         // if the new one is alewady in the queue, return
         if ( this.intention_queue.find( (i) => i.predicate.join(' ') == predicate.join(' ') ) ){
+            return;
+        }
+
+        if ( predicate[0] === 'go_deliver' &&
+            current.predicate[0] === 'go_pick_up' &&
+            shouldDeliverBeforePickup() ) {
+            const intention = new IntentionDeliberation( this, predicate );
+            this.intention_queue.push( intention );
+            current.stop();
             return;
         }
 
