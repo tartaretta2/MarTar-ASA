@@ -43,6 +43,8 @@ socket.onSensing( ( { self } ) => {
  * @type { Map< string, {id: string, carriedBy?: string, x:number, y:number, reward:number} > }
  */
 const parcels = new Map();
+const PARCEL_RETRY_COOLDOWN_MS = 10000;
+const parcelRetryAfter = new Map();
 
 const carrying = new Map();
 //let myAgent;
@@ -116,6 +118,16 @@ function shouldDeliverBeforePickup () {
 
     return nearestFreeParcelDistance < Number.MAX_VALUE &&
         distance( me, delivery ) + DELIVERY_PRIORITY_MARGIN <= nearestFreeParcelDistance;
+}
+
+function isParcelCoolingDown ( parcelId ) {
+    const retryAfter = parcelRetryAfter.get( parcelId );
+    if ( retryAfter === undefined ) return false;
+    if ( Date.now() >= retryAfter ) {
+        parcelRetryAfter.delete( parcelId );
+        return false;
+    }
+    return true;
 }
 
 
@@ -300,7 +312,7 @@ function optionsGeneration () {
     }
 
     for (const parcel of parcels.values())
-        if ( ! parcel.carriedBy )
+        if ( ! parcel.carriedBy && ! isParcelCoolingDown( parcel.id ) )
             options.push( [ 'go_pick_up', parcel.x, parcel.y, parcel.id ] );
             // myAgent.push( [ 'go_pick_up', parcel.x, parcel.y, parcel.id ] )
 
@@ -390,7 +402,7 @@ class IntentionRevision {
                     console.log( 'Skipping intention because no more valid', intention.predicate )
                 }
                 else {
-                    let timedOut = false;
+                    /*let timedOut = false;
                     let timeoutId;
                     const timeout = new Promise( resolve => {
                         timeoutId = setTimeout( () => {
@@ -410,6 +422,11 @@ class IntentionRevision {
                     clearTimeout( timeoutId );
                     if ( timedOut )
                         console.warn( 'Intention timed out and was stopped', intention.predicate );
+                */
+                    await intention.achieve().catch( error => {
+                        console.log( 'Failed intention', ...intention.predicate, 'with error:', error );
+                        return false;
+                    } );
                 }
 
                 // Remove from the queue
@@ -859,7 +876,13 @@ class GoPickUp extends PlanBase {
      */
     async execute ( go_pick_up, x, y, id ) {
         if ( this.stopped ) throw ['stopped']; // if stopped then quit
-        await this.subIntention( ['go_to', x, y] );
+        try {
+            await this.subIntention( ['go_to', x, y] );
+        } catch ( error ) {
+            if ( ! this.stopped )
+                parcelRetryAfter.set( id, Date.now() + PARCEL_RETRY_COOLDOWN_MS );
+            throw error;
+        }
         if ( this.stopped ) throw ['stopped']; // if stopped then quit
         const picked = await socket.emitPickup()
         if ( this.stopped ) throw ['stopped']; // if stopped then quit
@@ -1053,4 +1076,3 @@ planLibrary.push( GoPickUp )
 planLibrary.push( Explore )
 planLibrary.push( GoToBFS )
 planLibrary.push( GoDeliver )
-planLibrary.push( BlindMove )
