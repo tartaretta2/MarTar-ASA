@@ -91,6 +91,7 @@ socket.onSensing( async ( sensing ) => {
 } )
 
 const occupied = new Set();
+const crates = new Set();
 
 function nearestDelivery ( position ) {
     return deliveryTiles
@@ -101,11 +102,16 @@ function nearestDelivery ( position ) {
 
 socket.onSensing( async ( sensing ) => {
     occupied.clear();
+    crates.clear();
     for( const a of sensing.agents ){
         if ( a.id == me.id ) continue;
         if ( a.x == undefined || a.y == undefined ) continue;
         occupied.add( key(Math.floor(a.x), Math.floor(a.y)) );
         occupied.add( key(Math.ceil(a.x), Math.ceil(a.y)) );
+    }
+    for( const c of sensing.crates ?? [] ){
+        if ( c.x == undefined || c.y == undefined ) continue;
+        crates.add( key(Math.round(c.x), Math.round(c.y)) );
     }
 })
 
@@ -180,6 +186,7 @@ function canEnter(fromX, fromY, toX, toY, avoidAgents=false){
 
     if( !type ) return false;
     if ( type == '0' ) return false; // '0' = wall
+    if ( crates.has( key(toX, toY)) ) return false; // crate = obstacle
 
     const dx = toX - fromX;
     const dy = toY - fromY;
