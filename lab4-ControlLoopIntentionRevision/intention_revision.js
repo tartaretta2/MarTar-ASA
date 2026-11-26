@@ -10,7 +10,14 @@ function distance( {x:x1, y:y1}, {x:x2, y:y2}) {
     return dx + dy;
 }
 
-const MAX_CARRYING = 5;
+// capacity is set by the server (GAME.player.capacity, -1 = unlimited); 5 is the server default
+let MAX_CARRYING = 5;
+
+socket.onConfig( ( config ) => {
+    const capacity = config?.GAME?.player?.capacity;
+    if ( capacity === -1 ) MAX_CARRYING = Infinity;
+    else if ( typeof capacity === 'number' ) MAX_CARRYING = capacity;
+} );
 const INTENTION_TIMEOUT_MS = 5000;
 
 /**
@@ -83,13 +90,186 @@ socket.onSensing( async ( sensing ) => {
         myAgent?.cancelCurrent( 'go_deliver' );
 } )
 
+const occupied = new Set();
+const crates = new Set();
+
 function nearestDelivery ( position ) {
     return deliveryTiles
         .slice()
         .sort( (a, b) => distance( position, a ) - distance( position, b ) )[0];
 }
 
+const DELIVERY_PRIORITY_MARGIN = 3;
+// if the nearest delivery tile is closer than the nearest free parcel
+//  by at least DELIVERY_PRIORITY_MARGIN, then deliver first
+function shouldDeliverBeforePickup () {
+    if ( carrying.size === 0 ) return false;
 
+    const delivery = nearestDelivery( me );
+    if ( ! delivery ) return false;
+
+    let nearestFreeParcelDistance = Number.MAX_VALUE;
+    for ( const parcel of parcels.values() ) {
+        if ( parcel.carriedBy ) continue;
+        nearestFreeParcelDistance = Math.min( nearestFreeParcelDistance, distance( me, parcel ) );
+    }
+
+    return nearestFreeParcelDistance < Number.MAX_VALUE &&
+        distance( me, delivery ) + DELIVERY_PRIORITY_MARGIN <= nearestFreeParcelDistance;
+}
+
+
+socket.onSensing( async ( sensing ) => {
+    occupied.clear();
+    crates.clear();
+    for( const a of sensing.agents ){
+        if ( a.id == me.id ) continue;
+        if ( a.x == undefined || a.y == undefined ) continue;
+        occupied.add( key(Math.floor(a.x), Math.floor(a.y)) );
+        occupied.add( key(Math.ceil(a.x), Math.ceil(a.y)) );
+    }
+    for( const c of sensing.crates ?? [] ){
+        if ( c.x == undefined || c.y == undefined ) continue;
+        crates.add( key(Math.round(c.x), Math.round(c.y)) );
+    }
+})
+
+// the map
+
+// key for the .set() function of Map
+function key(x,y){
+    return `${x},${y}`;
+}
+
+const spawnerTiles = [];    //parcels spawner
+const walkableTiles = [];   
+const tileTypes = new Map;
+
+socket.onMap( (width, height, tiles) => {
+    spawnerTiles.length = 0;
+    walkableTiles.length = 0; 
+    tileTypes.clear();
+
+    for( const tile of tiles ) {
+        tileTypes.set(key(tile.x, tile.y), tile.type);
+
+        if( tile.type == '0' ){
+            continue;
+        }
+        walkableTiles.push( {x: tile.x, y: tile.y});
+        
+        if ( tile.type == '1' ){
+            spawnerTiles.push( {x: tile.x, y: tile.y} );
+        }
+    }
+} )
+
+function pickExploreTarget(){
+    const sx = Math.round(me.x);
+    const sy = Math.round(me.y);
+    let candidates = [];
+    if( spawnerTiles.length > 0 ){
+        candidates = spawnerTiles;
+    } else { candidates = walkableTiles; }
+
+    let reachable = [];
+    for( const t of candidates ){
+        const path = bfs(sx, sy, t.x, t.y);
+        if (path != null){
+            reachable.push({x: t.x, y: t.y, len: path.length});
+        }
+    }
+    
+    const far = reachable.filter( tile => tile.len > 3);
+
+    let pool =[];
+    if (far.length > 0){
+        pool = far;
+    } else { pool = reachable; }
+
+    let index = Math.floor( Math.random() * pool.length );
+    return pool[index];
+} 
+
+
+// canEnter returns true if the agent can move from the tile "from" to the near "to" tile, otherwise false
+const arrowDirections = {
+        '↑' : { dx:  0, dy:  1 },
+        '→' : { dx:  1, dy:  0 },
+        '↓' : { dx:  0, dy: -1 },
+        '←' : { dx: -1, dy:  0 }
+};
+
+function canEnter(fromX, fromY, toX, toY, avoidAgents=false){
+    const type = tileTypes.get(key(toX, toY));
+
+    if( !type ) return false;
+    if ( type == '0' ) return false; // '0' = wall
+    if ( crates.has( key(toX, toY)) ) return false; // crate = obstacle
+
+    const dx = toX - fromX;
+    const dy = toY - fromY;
+
+    if (type in arrowDirections){
+        const v = arrowDirections[type];
+        if( dx == -v.dx && dy == -v.dy){
+            return false;
+        }
+    }
+
+    if(avoidAgents && occupied.has( key(toX, toY) )) return false;
+
+    return true
+
+}
+
+
+// bfs (breadth-first search) function returns the array of moves to go to the target
+// example: ['up', 'up', 'left'] or null if the target cannot be reached
+// bfs explores "in circles" from the starting point
+
+const moves = [
+    { name : 'up', dx : 0, dy : 1 },
+    { name: 'down',  dx:  0, dy: -1 },
+    { name: 'right', dx:  1, dy:  0 },
+    { name: 'left',  dx: -1, dy:  0 }
+]
+
+function bfs(startX, startY, targetX, targetY, avoidAgents=false){
+    if ( startX == targetX && startY == targetY ) return []; //if you are already in the target
+    
+    const queue = [ { x : startX, y : startY } ];
+    const visited = new Map();
+    visited.set( key(startX, startY), null );
+
+    while ( queue.length > 0 ){
+        const cur = queue.shift();
+
+        for( const m of moves ){
+            const nx = cur.x + m.dx;
+            const ny = cur.y + m.dy;
+
+            if (visited.has(key(nx, ny))) continue;
+            if ( !canEnter(cur.x, cur.y, nx, ny, avoidAgents) ) continue;
+
+
+            visited.set( key(nx, ny), { from: cur, move: m.name });
+
+            if(nx == targetX && ny == targetY ){
+                const path = [];
+                let pos = { x:targetX, y:targetY };
+                while(visited.get(key(pos.x, pos.y)) != null){
+                    const step = visited.get(key(pos.x, pos.y));
+                    path.unshift(step.move);
+                    pos = step.from;
+                }
+                return path;
+            }
+            queue.push({x: nx, y: ny});
+        }
+    }
+    return null;
+}
 
 /**
  * Options generation and filtering function
@@ -107,7 +287,12 @@ function optionsGeneration () {
     //const carrying = Array.from( parcels.values() )
     //    .some( parcel => parcel.carriedBy == me.id );
     if ( carrying.size > 0){
-        if( parcels.size == carrying.size || carrying.size == MAX_CARRYING ){
+        const freeParcels = Array.from( parcels.values() ).some( parcel => ! parcel.carriedBy );
+        if( ! freeParcels || carrying.size >= MAX_CARRYING ){
+            myAgent.push( [ 'go_deliver' ] );
+            return;
+        }
+        if ( shouldDeliverBeforePickup() ) {
             myAgent.push( [ 'go_deliver' ] );
             return;
         }
@@ -138,15 +323,19 @@ function optionsGeneration () {
     /**
      * Best option is selected
      */
-    if ( best_option )
-        myAgent.push( best_option );
-
+    if ( best_option ){
+        myAgent.push( best_option )
+    }
+    else{
+        myAgent.push( ['explore'] )
+    }
 }
 
 /**
  * Generate options at every sensing event
  */
 socket.onSensing( optionsGeneration )
+setInterval( optionsGeneration, 500 );
 
 // /**
 //  * Alternatively, generate options continuously
@@ -426,6 +615,9 @@ class IntentionRevisionRevise extends IntentionRevision {
         
         let current = this.intention_queue[0];
 
+        if ( predicate[0] === 'go_pick_up' && shouldDeliverBeforePickup() )
+            return;
+
         // if the queue is empty, add the new one
         if(current == undefined){
             const intention = new IntentionDeliberation( this, predicate );
@@ -435,6 +627,15 @@ class IntentionRevisionRevise extends IntentionRevision {
         
         // if the new one is alewady in the queue, return
         if ( this.intention_queue.find( (i) => i.predicate.join(' ') == predicate.join(' ') ) ){
+            return;
+        }
+
+        if ( predicate[0] === 'go_deliver' &&
+            current.predicate[0] === 'go_pick_up' &&
+            shouldDeliverBeforePickup() ) {
+            const intention = new IntentionDeliberation( this, predicate );
+            this.intention_queue.push( intention );
+            current.stop();
             return;
         }
 
@@ -656,12 +857,18 @@ class GoPickUp extends PlanBase {
     /**
      * @type { function( string, ...any ) : Promise<boolean> } 
      */
-    async execute ( go_pick_up, x, y ) {
+    async execute ( go_pick_up, x, y, id ) {
         if ( this.stopped ) throw ['stopped']; // if stopped then quit
         await this.subIntention( ['go_to', x, y] );
         if ( this.stopped ) throw ['stopped']; // if stopped then quit
         const picked = await socket.emitPickup()
         if ( this.stopped ) throw ['stopped']; // if stopped then quit
+
+        // if no parcel was picked up, remove it from the beliefset and throw an error
+        if ( ! picked?.length ) {
+            parcels.delete( id );
+            throw [ 'no parcel picked up', id ];
+        }
         
         // update parcels beliefset and carrying set
         for (const p of picked) {
@@ -675,6 +882,62 @@ class GoPickUp extends PlanBase {
         return true;
     }
 
+}
+
+class Explore extends PlanBase {
+    static isApplicableTo(explore){
+        if (explore == 'explore'){
+            return true;
+        } return false;
+    }
+
+    async execute(explore){
+        let target = pickExploreTarget();
+        if ( !target ) throw ['no tile to explore']; //if target doesn't exist
+        if ( this.stopped ) throw ['stopped'];
+        await this.subIntention(['go_to', target.x, target.y]);
+        if ( this.stopped ) throw ['stopped'];  
+
+        return true;
+    }
+}
+
+
+class GoToBFS extends PlanBase{
+    static isApplicableTo(go_to, x, y){
+        return go_to == 'go_to' 
+    }
+
+    async execute(go_to, x, y){
+        let replans = 0; //how many times recalculated
+
+        while (true){
+            if ( this.stopped ) throw ['stopped'];
+            const sx = Math.round(me.x);
+            const sy = Math.round(me.y);
+
+            if( sx == x && sy == y ) return true;
+
+            const path = bfs(sx, sy, x, y, true); 
+
+            if ( path == null ) throw ['no path'];
+
+            for (const move of path ){
+                if ( this.stopped ) throw ['stopped'];
+
+                const result = await socket.emitMove(move);
+
+                if ( result ) {
+                    me.x = result.x;
+                    me.y = result.y;
+                } else {
+                    replans++;
+                    if ( replans > 3 ) throw ['stuck'];
+                    break;
+                }
+            }   
+        }
+    }
 }
 
 /**
@@ -787,5 +1050,7 @@ class BlindMove extends PlanBase {
 
 // plan classes are added to plan library 
 planLibrary.push( GoPickUp )
+planLibrary.push( Explore )
+planLibrary.push( GoToBFS )
 planLibrary.push( GoDeliver )
 planLibrary.push( BlindMove )
