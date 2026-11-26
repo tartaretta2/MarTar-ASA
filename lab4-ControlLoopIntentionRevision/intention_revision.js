@@ -822,12 +822,18 @@ class GoPickUp extends PlanBase {
     /**
      * @type { function( string, ...any ) : Promise<boolean> } 
      */
-    async execute ( go_pick_up, x, y ) {
+    async execute ( go_pick_up, x, y, id ) {
         if ( this.stopped ) throw ['stopped']; // if stopped then quit
         await this.subIntention( ['go_to', x, y] );
         if ( this.stopped ) throw ['stopped']; // if stopped then quit
         const picked = await socket.emitPickup()
         if ( this.stopped ) throw ['stopped']; // if stopped then quit
+
+        // if no parcel was picked up, remove it from the beliefset and throw an error
+        if ( ! picked?.length ) {
+            parcels.delete( id );
+            throw [ 'no parcel picked up', id ];
+        }
         
         // update parcels beliefset and carrying set
         for (const p of picked) {
