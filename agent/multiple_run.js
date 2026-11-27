@@ -2,7 +2,7 @@ import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 
 // absolute path, so that this script can be launched from any directory
-const agentPath = fileURLToPath( new URL( './intention_revision.js', import.meta.url ) );
+const agentPath = fileURLToPath( new URL( './bdi_agent.js', import.meta.url ) );
 
 // Function to spawn child processes
 function spawnProcesses() {
